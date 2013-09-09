@@ -1,0 +1,395 @@
+/******************************************************************************
+ *
+ * Freescale Semiconductor Inc.
+ * (c) Copyright 2004-2010 Freescale Semiconductor, Inc.
+ * ALL RIGHTS RESERVED.
+ *
+ ******************************************************************************
+ *
+ * THIS SOFTWARE IS PROVIDED BY FREESCALE "AS IS" AND ANY EXPRESSED OR 
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES 
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  
+ * IN NO EVENT SHALL FREESCALE OR ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, 
+ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES 
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR 
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) 
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, 
+ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING 
+ * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF 
+ * THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * This software is the USB driver stack for S08 family
+ *****************************************************************************/
+  
+#include "types.h"
+#include "derivative.h" /* include peripheral declarations */
+#include "user_config.h"
+#include "RealTimerCounter.h"
+#include "stdio.h"
+  
+/*****************************************************************************
+ * Global Functions Prototypes
+ *****************************************************************************/
+void interrupt VectorNumber_Virq IRQ_ISR(void);
+extern void TestApp_Init(void);
+extern void TestApp_Task(void);
+  
+/*****************************************************************************
+ * Local Functions Prototypes
+ *****************************************************************************/
+static void Watchdog_Reset(void);
+static void Mcu_Init(void);
+static void MCG_Init(void);
+static void GPIO_init(void);
+static void VREF_init(void);
+static void DAC_init(void);
+static void TRIAMP1_init(void);
+static void TRIAMP2_init(void);
+static void GPOA1_init(void);
+static void GPOA2_init(void);
+static void ADC_init(void);
+static int ADC_read(int ch);
+  
+/****************************************************************************
+ * Global Variables
+ ****************************************************************************/
+/* unsecure flash */
+const uint_8 sec@0x040f = 0x00; 
+/* checksum bypass */
+const uint_8 checksum_bypass@0x040a = 0x0; 
+  
+/* Temporary ADC value */
+volatile int adc_temp = 0;
+  
+extern uint_8 g_curr_send_buf[64];
+extern uint_8 g_send_size;
+  
+/******************************************************************************
+ * This function initializes the system, enables the interrupts and calls the
+ * application
+ *****************************************************************************/
+void main(void)
+  
+{
+    volatile int count = 0;
+    volatile int count2 = 0;
+    volatile int dacval = 3000;
+    volatile int adcval = 0;
+    Mcu_Init();
+    MCG_Init();
+    GPIO_init();
+    VREF_init();
+    DAC_init();
+    TRIAMP1_init();
+    TRIAMP2_init();
+    GPOA1_init();
+    GPOA2_init();
+    ADC_init();
+  
+    DACDAT0H = (byte)((dacval >> 8) & 0xff);
+    DACDAT0L = (byte)(dacval & 0xff);
+    PTAD_PTAD5 = 1;
+    PTAD_PTAD6 = 0;
+  
+    (void)TestApp_Init(); /* Initialize the USB Test Application */
+    printf("\nStarted\n\r");
+  
+    while(TRUE)
+    {
+        Watchdog_Reset();
+        TestApp_Task();
+  
+        if(PTAD_PTAD5 == 0) {
+            adcval = ADC_read(0);
+            dacval = 2000;
+            printf("R,DAC,%i,ADC,%i\n\r", dacval, adcval);
+            PTAD_PTAD5 = 1;
+            PTAD_PTAD6 = 0;
+            } 
+                DACDAT0H = (byte)((dacval >> 8) & 0xff);
+                DACDAT0L = (byte)(dacval & 0xff);
+        else {
+            adcval = ADC_read(0);
+            dacval = 4000;
+            printf("I,DAC,%i,ADC,%i\n\r", dacval, adcval);
+            PTAD_PTAD5 = 0;
+            PTAD_PTAD6 = 1;
+        }
+                DACDAT0H = (byte)((dacval >> 8) & 0xff);
+                DACDAT0L = (byte)(dacval & 0xff);
+        count = 0;
+        while(count < 10000) {
+            Watchdog_Reset();
+            count++;
+        }
+        count2++;
+        if (count2 > 100) {
+            count2 = 0;
+            if (g_send_size == 0) {
+                g_send_size += snprintf((char *)g_curr_send_buf, 64,
+                        "0x%04X,0x%04X,0x%04X\n\r",
+                        adcval,
+                        adcval,
+                        adcval
+                        );
+            }
+        }
+          
+        /*dacval-=10;
+        if (dacval <= 0) {
+            dacval = 4096;
+        }
+        DACDAT0H = (byte)((dacval >> 8) & 0xff);
+        DACDAT0L = (byte)(dacval & 0xff);
+        */
+    }
+}
+  
+  
+static void Watchdog_Reset(void)
+{
+    SRS = 0x55;
+    SRS = 0xAA;
+}
+  
+/*****************************************************************************
+ * It will configure the MCU to disable STOP and COP Modules.
+ * It also set the MCG configuration and bus clock frequency.
+ ****************************************************************************/
+static void Mcu_Init()
+{
+    SOPT1 = 0x23; /* disable COP; enable bkgd, stop and wait mode */
+    SOPT2 = 0x06; /* set right endianess for USB module */
+    SOPT3 &= ~SOPT3_SCI1PS_MASK;/* route TX1,RX1 to PTD6,PTD7 */
+}
+  
+/*****************************************************************************
+ * Provides clocking options for the device, including a phase-locked
+ * loop(PLL) and frequency-locked loop (FLL) for multiplying slower reference
+ * clock sources
+ ****************************************************************************/
+static void MCG_Init()
+{
+    /* Assume 12MHz external clock source connected. */
+    /* In order to use the USB we need to enter PEE mode and MCGOUT set to 48 MHz. 
+     Out of reset MCG is in FEI mode. */
+  
+    //------FBE MODE------  
+    /* Assume 16MHz external clock source connected. */
+    MCGC2_BDIV = 0;
+    MCGC2_RANGE = 1;
+    MCGC2_HGO = 1;
+    MCGC2_LP = 0;
+    MCGC2_EREFS = 1;
+    MCGC2_ERCLKEN = 0;
+    MCGC2_EREFSTEN = 0;
+  
+    MCGC3_LOLIE = 0;
+    MCGC3_PLLS = 0;     /* PLL or FLL */
+    MCGC3_CME = 0;
+    MCGC3_DIV32 = 1;
+    MCGC3_VDIV = 1;
+  
+    MCGC1_CLKS = 2;
+    MCGC1_RDIV = 4;     /* !!! */
+    MCGC1_IREFS = 0;
+    MCGC1_IRCLKEN = 0;
+    MCGC1_IREFSTEN = 0;
+  
+    while (MCGSC_IREFST) ;
+    while (MCGSC_CLKST != 0b10) ; 
+  
+    //------PBE MODE------ 
+    MCGC3_LOLIE = 0;
+    MCGC3_PLLS = 1;
+    MCGC3_CME = 0;
+    MCGC3_DIV32 = 1;
+    MCGC3_VDIV = 0xC;   /* Looks like this is important */
+    while (!MCGSC_PLLST) ; 
+    while (!MCGSC_LOCK) ; 
+  
+    //------PEE MODE------   
+    MCGC1 = 0x20;
+    MCGC1_CLKS = 0;
+    MCGC1_RDIV = 4;     /* !!! */
+    MCGC1_IREFS = 0;
+    MCGC1_IRCLKEN = 0;
+    MCGC1_IREFSTEN = 0;
+    while (MCGSC_CLKST != 0b11) ; 
+}
+  
+/******************************************************************************
+ * This function is hooked on to the IRQ interrupt and is called each time
+ * we get an IRQ interrupt
+ *****************************************************************************/
+void interrupt VectorNumber_Virq IRQ_ISR(void)
+{
+    IRQSC_IRQACK = 1; /* acknoledge IRQ */
+}
+  
+/* General purpose I/O initialization*/
+static void GPIO_init(void)
+{
+    /*output pins*/
+    PTADD_PTADD5 = 1;
+    PTADD_PTADD6 = 1;
+    /*+high drive stength*/
+    /*PTADS_PTADD5 = 1;
+    PTADS_PTADD6 = 1;*/
+}
+  
+/* Voltage reference initialization */
+static void VREF_init(void)
+{
+    VREFSC_MODE = 2;/*tight regulation buffer for internal and external use*/
+    VREFSC_VREFEN = 1;
+    while (!VREFSC_MODE) ;
+}
+  
+/* DAC initialization */
+static void DAC_init(void)
+{
+    DACC0_DACBIE = 0; 
+    DACC0_DACTIE = 0;
+    DACC0_DACWIE = 0;
+    DACC0_LPEN = 0;
+    DACC0_DACSTRG = 0;
+    DACC0_DACTSEL = 0;
+    DACC0_DACRFS = 0; /*vref 1.15V*/
+    DACC1_DACBFE = 0;
+    DACC1_DACBFMD = 0;
+    DACC1_DACBFWM = 0;
+    DACC0_DACEN = 1;
+}
+  
+/* TRIAMP1 initialisation 
+differential ADC conversions on internal pins to give DC R, IR and Ambient?*/
+  
+static void TRIAMP1_init(void)
+{
+    SCGC3_TRIAMP1 = 1;
+    TIAMP1C0_LPEN = 0;
+    TIAMP1C0_TIAMPEN = 1;
+}
+/*TRIAMP2 initialisation*/
+static void TRIAMP2_init(void)
+{
+    SCGC3_TRIAMP2 = 1;
+    TIAMP2C0_LPEN = 0;
+    TIAMP2C0_TIAMPEN = 1;
+}
+  
+/*OPAMP initialisation*/
+/*clock gating , genral opamp, high-speed, enable*/
+static void GPOA1_init(void)
+{
+    SCGC3_GPOA1 = 1;   
+    GPAMP1C0_MODE = 2;  
+    GPAMP1C0_LPEN = 0;  
+    GPAMP1C0_GPAMPEN = 1; 
+}
+  
+static void GPOA2_init(void)
+/*{
+    SCGC3_GPOA2 = 1;   
+  
+    GPAMP2C0_MODE = 1;      
+    GPAMP2C0_LPEN = 0;  
+    GPAMP2C0_GPAMPEN = 1;
+  
+    GPAMP2C1_AMPRF = 3;
+    GPAMP2C1_AMPRI = 0; 
+  
+    GPAMP2C2_AMPPSEL = 0; 
+    GPAMP2C2_AMPNSEL = 1;   
+}*/
+    {
+    SCGC3_GPOA2 = 1;   
+  
+    GPAMP2C0_MODE = 0;      
+    GPAMP2C0_LPEN = 0;  
+    GPAMP2C0_GPAMPEN = 1;
+    }
+/******************************************************************************
+ * specified clock gating, high speed, enabled, 
+ * buffer and inputs
+ */
+/*static void OPAMP2_init(void)
+  
+{
+    SCGC3_GPOA2 = 1;   
+    GPAMP2C0_MODE = 0;  
+    GPAMP2C0_LPEN = 0;  
+    GPAMP2C0_GPAMPEN = 1;
+    GPAMP2C2_AMPPSEL = 0;
+    GPAMP2C2_AMPNSEL = 2;
+}
+  
+    SCGC3_GPOA2 = 1;   
+    GPAMP2C0_MODE = 0;  
+    GPAMP2C0_LPEN = 0;  
+    GPAMP2C0_GPAMPEN = 1;
+    GPAMP2C2_AMPPSEL = 0;
+    /*GPAMP2C2_AMPNSEL = 2;*/
+/******************************************************************************
+ * specified clock gating, high speed, enabled, gain 16 and inputs
+ */
+/*static void OPAMP2_init(void)
+  
+  
+  
+/* ADC initialization */
+static void ADC_init(void)
+{
+    /* disable all channels */
+    ADCSC1A_ADCHA = 0x1F;
+    ADCSC1B_ADCHB = 0x1F;
+    ADCSC1C_ADCHC = 0x1F;
+    ADCSC1D_ADCHD = 0x1F;
+    ADCSC1E_ADCHE = 0x1F;
+    ADCSC1F_ADCHF = 0x1F;
+    ADCSC1H_ADCHH = 0x1F;
+    ADCSC1G_ADCHG = 0x1F;
+  
+    ADCCFG1_ADLPC = 0;
+    ADCCFG1_ADIV = 0;
+    ADCCFG1_ADLSMP = 1;
+    ADCCFG1_MODE = 3;   /* 16-bit */
+    ADCCFG1_ADICLK = 0;
+  
+    ADCSC2_ADACT = 0;
+    ADCSC2_ADTRG = 0;
+    ADCSC2_ACFE = 0;
+    ADCSC2_ACFGT = 0;
+    ADCSC2_ACREN = 0;
+    ADCSC2_REFSEL = 1; /*1.15V*/
+  
+    ADCSC3_ADCO = 1;    /* Cont. convertion */
+    ADCSC3_AVGE = 0;    /*no hardware average*/
+    ADCSC3_AVGS = 3;
+  
+    ADCCFG2_ADHSC = 0;
+    ADCCFG2_ADLSTS = 0;
+    ADCCFG2_ADACKEN = 0;
+    APCTL1 = 0;
+    APCTL2 = 0;
+    /* channels configuration - 2 channels for now */
+    ADCSC1A_COCOA = 0;
+    ADCSC1A_AIENA = 0;
+    ADCSC1A_DIFFA = 1;  /* differential */
+    ADCSC1A_ADCHA = 0;  /* DADP0 DADMO */
+    ADCRA = 0;
+    /* TODO: calibration here */
+}
+  
+static int ADC_read(int ch)
+{
+    unsigned char h, l;
+    if (ADCSC1A_COCOA) {
+        h = ADCRHA;
+        l = ADCRLA;
+        adc_temp = (h << 8);
+        adc_temp |= l;
+    }
+    return adc_temp;
+}
